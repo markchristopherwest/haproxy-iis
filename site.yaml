@@ -260,7 +260,6 @@
       socket: /var/run/haproxy.sock
       weight: 10
       backend: www
-    when: target_environment == "AMZN"
 
   - name: Enable haproxy
     service:
