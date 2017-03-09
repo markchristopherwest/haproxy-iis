@@ -1,0 +1,2 @@
+[jumpbox-rhel]
+192.168.51.102 ansible_ssh_pass=ChangeMe123! ansible_ssh_user=root

@@ -1,0 +1,408 @@
+# Title: haproxy-iis
+# Author: Mark West
+# Email: mark.west@redhat.com
+# Info: This playbook spawns an HA proxy instance with 2 IIS load
+# Set All Vars
+---
+- name: Deploy Stack
+  hosts: jumpbox-rhel
+  vars:
+      amzn_group: "sg-fea6d086"
+      amzn_haproxy_ami: ""
+      amzn_haproxy_type: "t1.micro"
+      amzn_windows_admin_pass: "ChangeMe123"
+      #amzn_windows_ami: "ami-cf9722af"
+      amzn_windows_ami: "ami-6b9f200b"
+      amzn_windows_type: "t2.small"
+      amzn_key: "ansible"
+      amzn_region: "us-west-2"
+      amzn_vpc: "subnet-5d508514"
+      target_environment: 'AMZN'
+      target_fqdn_haproxy: 'haproxy.example.com'
+      target_size_haproxy: 't1.micro'
+      target_fqdn_windows0: 'win0.example.com'
+      target_size_windows0: 't2.small'
+      target_fqdn_windows1: 'haproxy.example.com'
+      target_size_windows1: 't2.small'
+      target_ipv4: "10.0.1.101"
+      target_ipv4_gw: "{{ target_ipv4.split('.')[0] }}.{{ target_ipv4.split('.')[1] }}.{{ target_ipv4.split('.')[2] }}.1"
+      target_ipv4_subnet: "255.255.255.0"
+      target_dns0: "4.2.2.2"
+      target_dns1: "8.8.8.8"
+      haproxy_balance_algorithm: 'Roundrobin'
+  #    haproxy_balance_algorithm: 'Lastconn'
+  #    haproxy_balance_algorithm: 'Source'
+      haproxy_environment: 'AMZN'
+      haproxy_hostname: 'haproxy.mydomain.com'
+      haproxy_ipv4: "{{ target_ipv4 }}"
+      haproxy_ipv4_gw: "{{ target_ipv4.split('.')[0] }}.{{ target_ipv4.split('.')[1] }}.{{ target_ipv4.split('.')[2] }}.1"
+      haproxy_ipv4_subnet: "255.255.255.0"
+      haproxy_ipv4_dns0: "{{ target_dns0 }}"
+      haproxy_ipv4_dns1: "{{ target_dns1 }}"
+      vcenter_hostname: "192.168.51.103"
+      vcenter_user: "administrator@vsphere.local"
+      vcenter_pass: "ChangeMe123!"
+      vcenter_esx: "esx65.local"
+      vcenter_datacenter: "datacenter"
+      vcenter_guest_name: ""
+
+
+  tasks:
+  - name: Deploy HAPROXY Instance to AMZN
+    ec2:
+      key_name: ansible
+      instance_type: "{{ amzn_haproxy_type }}"
+      image:  ami-8a72cdea
+      wait: yes
+      group_id: sg-fea6d086
+      count: 1
+      vpc_subnet_id: "{{ amzn_vpc}}"
+      assign_public_ip: yes
+      region: us-west-2
+    when: target_environment == "AMZN"
+    register: amzn_haproxy
+
+
+  - name: Add new instance to host group
+    add_host:
+      hostname: "{{ item.public_ip }}"
+      groupname: haproxy
+      ansible_user: ec2-user
+      ansible_ssh_private_key_file: /Users/mawest/Downloads/ansible.pem
+    with_items: "{{ amzn_haproxy.instances }}"
+    when: target_environment == "AMZN"
+
+  - name: Wait for SSH to come up
+    wait_for:
+      host: "{{ item.public_ip }}"
+      port: 22
+      delay: 30
+      timeout: 90
+      state: started
+    with_items: "{{ amzn_haproxy.instances }}"
+    when: target_environment == "AMZN"
+
+  - name: create win ec2 instance(s)
+    ec2:
+      key_name: "{{amzn_key}}"
+      instance_type: "{{ amzn_windows_type }}"
+      image:  "{{amzn_windows_ami}}"
+      wait: yes
+      group_id: "{{amzn_group}}"
+      count: 2
+      vpc_subnet_id: "{{ amzn_vpc}}"
+      assign_public_ip: yes
+      region: "{{amzn_region}}"
+      user_data: "<powershell>
+  Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force\n
+  $storageDir = $pwd\n
+  $webclient = New-Object System.Net.WebClient\n
+  $url = \"https://raw.githubusercontent.com/ansible/ansible/devel/examples/scripts/ConfigureRemotingForAnsible.ps1\"\n
+  $file = \"C:\\Program Files\\Amazon\\Ec2ConfigService\\Scripts\\ConfigureRemotingForAnsible.ps1\"\n
+  $webclient.DownloadFile($url,$file)\n
+  $VerbosePreference=\"Continue\"\n
+  & $file\n
+  $user=[adsi]\"WinNT://localhost/Administrator,user\"\n
+  $user.SetPassword(\"{{amzn_windows_admin_pass}}\")\n
+</powershell>"
+    when: target_environment == "AMZN"
+    register: ec2_windows
+
+
+  - name: 
+    ec2_remote_facts:
+      filters:
+        instance-type: t2.small
+      region: "{{amzn_region}}"
+    register: amzn_facts_windows
+
+
+  - name: 
+    ec2_remote_facts:
+      filters:
+        instance-type: t1.micro
+      region: "{{amzn_region}}"
+    register: amzn_facts_haproxy
+
+
+  - name: Pause for AWS to spin up instances
+    pause: prompt="Please wait..." minutes=1
+    
+  - name: Create HAPROXY from template
+    vmware_guest:
+      validate_certs: False
+      hostname: "{{ vcenter_hostname }}"
+      username: "{{ vcenter_user }}"
+      password: "{{ vcenter_pass }}"
+      esxi_hostname: "{{ esxhost }}"
+      datacenter: "{{ vcenter_datacenter }}"
+      name: "{{ vcenter_guest_name }}"
+      template: "{{ vmtemplate }}"
+      disk:
+        - size_gb: 10
+          type: thin
+          datastore: "{{ datastore }}"
+      nic:
+        - type: vmxnet3
+          network: "{{ network }}"
+      hardware:
+        memory_mb: "{{ vm_memory | default(1024) }}"
+      wait_for_ip_address: True
+      state: present
+    register: vmw_haproxy
+    when: target_environment == "VMW"
+    
+  - name: IP address info
+    debug:
+      msg: "{{ vmw_haproxy.instance.ipv4 }} {{ vcenter_guest_name }}"
+    when: target_environment == "VMW"
+
+  - name: Add new instance to host group
+    add_host:
+      hostname: "{{ vmw_haproxy.instance.ipv4 }}"
+      groupname: haproxy
+    with_items: "{{ vmw_haproxy }}"
+    when: target_environment == "VMW"
+
+  - name: Create WINDOWS VM 1 from template
+    vmware_guest:
+      validate_certs: False
+      hostname: "{{ vcenter_hostname }}"
+      username: "{{ vcenter_user }}"
+      password: "{{ vcenter_pass }}"
+      esxi_hostname: "{{ esxhost }}"
+      datacenter: "{{ vcenter_datacenter }}"
+      name: "{{ vcenter_guest_name }}"
+      template: "{{ vmtemplate }}"
+      disk:
+        - size_gb: 10
+          type: thin
+          datastore: "{{ datastore }}"
+      nic:
+        - type: vmxnet3
+          network: "{{ network }}"
+      hardware:
+        memory_mb: "{{ vm_memory | default(1024) }}"
+      wait_for_ip_address: True
+      state: present
+    register: vmw_windows
+    when: target_environment == "VMW"
+    
+  - name: IP address info
+    debug:
+      msg: "{{ vmw_windows.instance.ipv4 }} {{ vcenter_guest_name }}"
+    when: target_environment == "VMW"
+
+  - name: Add new instance to host group
+    add_host:
+      hostname: "{{ vmw_windows.instance.ipv4 }}"
+      groupname: windows
+    with_items: "{{ vmw_windows }}"
+    when: target_environment == "VMW"
+
+  - name: Create WINDOWS VM 2 from template
+    vmware_guest:
+      validate_certs: False
+      hostname: "{{ vcenter_hostname }}"
+      username: "{{ vcenter_user }}"
+      password: "{{ vcenter_pass }}"
+      esxi_hostname: "{{ esxhost }}"
+      datacenter: "{{ vcenter_datacenter }}"
+      name: "{{ vcenter_guest_name }}"
+      template: "{{ vmtemplate }}"
+      disk:
+        - size_gb: 10
+          type: thin
+          datastore: "{{ datastore }}"
+      nic:
+        - type: vmxnet3
+          network: "{{ network }}"
+      hardware:
+        memory_mb: "{{ vm_memory | default(1024) }}"
+      wait_for_ip_address: True
+      state: present
+    register: vmw_windows
+    when: target_environment == "VMW"
+    
+  - name: IP address info
+    debug:
+      msg: "{{ vmw_windows.instance.ipv4 }} {{ vcenter_guest_name }}"
+    when: target_environment == "VMW"
+
+  - name: Add new instance to host group
+    add_host:
+      hostname: "{{ vmw_windows.instance.ipv4 }}"
+      groupname: windows
+    with_items: "{{ vmw_windows }}"
+    when: target_environment == "VMW"
+
+- name: Configure HAPROXY
+  hosts: haproxy
+  sudo: True
+  vars:
+    haproxy_balance_type: "{{haproxy_balance_algorithm}}"
+    haproxy_tenants: ""
+
+  tasks:
+  - name: Yum Install haproxy
+    yum: name=haproxy state=latest
+
+  - name: Yum Install openssl-devel
+    yum: name=openssl-devel state=latest
+
+  - name: ssh-keygen
+    shell: ssh-keygen -b 2048 -t rsa -f /var/tmp/sshkey -q -N ""
+
+  # enable server in 'www' backend pool with change server(s) weight
+  - haproxy:
+      state: enabled
+      host: '{{ item.public_ip }}'
+      socket: /var/run/haproxy.sock
+      weight: 10
+      backend: www
+    when: target_environment == "AMZN"
+
+  - name: Enable haproxy
+    service:
+      name: haproxy
+      enabled: yes
+
+  - name: Start haproxy
+    service:
+      name: evmserverd
+      state: started
+
+- name: Configure Windows
+  hosts: windows
+  vars:
+    haproxy_balance_type: "{{haproxy_balance_algorithm}}"
+    haproxy_tenants: ""
+
+  tasks:
+  - name: Install & Configue IIS
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Install IIS
+      win_feature:
+        name: "Web-Server"
+        state: present
+        restart: yes
+        include_sub_features: yes
+        include_management_tools: yes
+
+    - name: Create AppPool and start it using .NET 4.0
+      win_iis_webapppool:
+        name: AppPool
+        state: started
+        attributes: managedRuntimeVersion:v4.0
+      register: webapppool
+
+    - name: Acme IIS site
+      win_iis_website:
+        name: "Acme"
+        state: started
+        port: 80
+        ip: 127.0.0.1
+        hostname: acme.local
+        application_pool: "acme"
+        physical_path: c:\sites\acme
+        parameters: logfile.directory:c:\sites\logs
+      register: website
+
+    - name: Download simple web site to 'C:\inetpub\wwwroot\ansible.html'
+      win_get_url:
+        url: 'https://raw.githubusercontent.com/thisdavejohnson/mywebapp/master/index.html'
+        dest: 'C:\inetpub\wwwroot\ansible.html'
+
+    - name: Firewall rule to allow port 80
+      action: win_firewall_rule
+      args:
+          name: http
+          enable: yes
+          state: present
+          localport: 80
+          action: allow
+          direction: In
+          protocol: TCP
+          #profile: public
+
+    - name: Firewall rule to allow port 443
+      action: win_firewall_rule
+      args:
+          name: https
+          enable: yes
+          state: present
+          localport: 443
+          action: allow
+          direction: In
+          protocol: TCP
+          #profile: public
+
+    - name: netsh to forward port 80 traffic to 443
+      win_command: netsh interface portproxy add v4tov4 listenport=80 listenaddress=192.168.1.1 connectport=443 connectaddress=192.168.1.1
+      args:
+        chdir: C:\somedir\
+        creates: C:\backup\
+
+
+#  - name: Terminate WINDOWS instances that were previously launched
+#    ec2:
+#      state: 'absent'
+#      instance_ids: '{{ item.0 }}'
+#      region: "{{amzn_region}}"
+#    with_together:
+#      - "{{ amzn_facts.instances|selectattr('state', 'equalto', 'running')|map(attribute='id')|list }}"
+
+
+
+#  - name: Terminate HAPROXY instances that were previously launched
+#    ec2:
+#      state: 'absent'
+#      instance_ids: '{{ amzn_haproxy.instance_ids }}'
+#    when: target_environment == "AMZN"
+
+#  - name: Terminate WINDOWS instances that were previously launched
+#    ec2:
+#      state: 'absent'
+#      instance_ids: '{{ amzn_windows.instance_ids }}'
+
+
+  #  - name: Add User
+    #  win_user:
+    #    name: ansible
+    #    password: "@ns1bl3"
+    #    state: present
+
+  #  - name: Download the Apache installer
+    #  win_get_url:
+    #    url: 'http://mirror.cc.columbia.edu/pub/software/apache//httpd/binaries/win32/httpd-2.2.25-win32-x86-no_ssl.msi'
+    #    dest: 'C:\Users\Administrator\Downloads\httpd-2.2.25-win32-x86-no_ssl.msi'
+
+  #  - name: Install MSI
+    #  win_msi: 
+    #    path: 'C:\Users\Administrator\Downloads\httpd-2.2.25-win32-x86-no_ssl.msi'
+    #    state: present
+
+  # This playbook tests the script module on Windows hosts
+
+  #  - name: Run powershell script
+    #  script: files/helloworld.ps1
+
+
+  #  - name: Run a backupTarget
+    #  win_command: wbadmin -backupTarget:C:\backup\ creates=C:\backup\
+    #    args:
+    #      chdir: C:\somedir\
+    #      creates: C:\backup\
+
+
+  #  - name: Run powershell script
+    #  script: files/helloworld.ps1
+
+
+  #  - name: Run a backupTarget
+    #  win_command: wbadmin -backupTarget:C:\backup\ creates=C:\backup\
+    #    args:
+    #      chdir: C:\somedir\
+    #      creates: C:\backup\
